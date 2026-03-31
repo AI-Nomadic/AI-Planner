@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+dist/
+
+# Env
+.env
+*.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
