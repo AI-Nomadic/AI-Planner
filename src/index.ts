@@ -181,8 +181,10 @@ const searchPlaceDetails = async (query: string) => {
             });
             const richPlace = detailsResponse.data.result;
             return {
-                lat: basicPlace.geometry?.location.lat,
-                lng: basicPlace.geometry?.location.lng,
+                coordinates: {
+                    lat: basicPlace.geometry?.location.lat,
+                    lng: basicPlace.geometry?.location.lng,
+                },
                 placeId: basicPlace.place_id,
                 rating: basicPlace.rating,
                 user_ratings_total: basicPlace.user_ratings_total,
@@ -199,8 +201,10 @@ const searchPlaceDetails = async (query: string) => {
 
   // Fallback Mock
   return {
-    lat: 49.2827 + (Math.random() - 0.5) * 0.05,
-    lng: -123.1207 + (Math.random() - 0.5) * 0.05,
+    coordinates: {
+        lat: 49.2827 + (Math.random() - 0.5) * 0.05,
+        lng: -123.1207 + (Math.random() - 0.5) * 0.05,
+    },
     placeId: "mock_" + uuidv4().slice(0, 8),
     rating: (Math.random() * 1.5 + 3.5).toFixed(1),
     user_ratings_total: Math.floor(Math.random() * 5000),
@@ -215,6 +219,8 @@ const searchPlaceDetails = async (query: string) => {
 
 app.post('/api/planner/generate', async (req, res) => {
   const { destination, travelers, vibe, budget, interests, numDays, month, startDate, endDate } = req.body;
+  console.log(`🚀 [Planner] Generating Trip for: ${destination} (${numDays} days)`);
+
   const model = genAI.getGenerativeModel({
     model: "gemini-flash-latest",
     generationConfig: { responseMimeType: "application/json", responseSchema: ITINERARY_SCHEMA },
@@ -253,8 +259,9 @@ app.post('/api/planner/generate', async (req, res) => {
 
     tripSessions.set(tripId, skeleton);
     res.json(skeleton);
-  } catch (error) {
-    res.status(500).json({ error: "Failed" });
+  } catch (error: any) {
+    console.error("❌ [Planner] Generation Error:", error);
+    res.status(500).json({ error: "Failed to generate: " + (error.message || "Unknown error") });
   }
 });
 
@@ -275,23 +282,24 @@ app.get('/api/planner/stream/:tripId', async (req, res) => {
     day.accommodation.imageGallery = await searchPhotos(day.accommodation.hotelName, 4);
 
     // 2. Hydrate Activities & Calculate Timeline
-    let lastCoords = { lat: hotelDetails.lat, lng: hotelDetails.lng };
+    let lastCoords = hotelDetails.coordinates;
 
     for (const act of day.activities) {
         const details = await searchPlaceDetails(act.title + " " + act.location + " " + destinationLabel(trip));
         act.imageGallery = await searchPhotos(act.title, 3);
         
         // --- LOGISTICS ENGINE ---
-        const dist = calculateDistance(lastCoords, { lat: details.lat, lng: details.lng });
+        const dist = calculateDistance(lastCoords, details.coordinates);
         const travelMins = estimateTravelTime(dist);
         
+        act.travelDistance = Math.round(dist * 10) / 10; // New field for Java Backend
         act.travelTimeFromPrev = travelMins;
         act.timeSlot = {
             start: addMinutes(currentTime, travelMins),
             end: addMinutes(addMinutes(currentTime, travelMins), act.durationMinutes || 120)
         };
         act.time = act.timeSlot.start;
-        act.coordinates = { lat: details.lat, lng: details.lng };
+        act.coordinates = details.coordinates;
         act.placeId = details.placeId;
         act.rating = details.rating;
         act.user_ratings_total = details.user_ratings_total;
@@ -301,7 +309,7 @@ app.get('/api/planner/stream/:tripId', async (req, res) => {
 
         // Move the "Clock" forward
         currentTime = act.timeSlot.end;
-        lastCoords = { lat: details.lat, lng: details.lng };
+        lastCoords = details.coordinates;
     }
 
     res.write(`event: day_hydrated\ndata: ${JSON.stringify({ dayIndex: i, dayData: day })}\n\n`);
@@ -311,6 +319,88 @@ app.get('/api/planner/stream/:tripId', async (req, res) => {
   res.write(`event: complete\ndata: ${JSON.stringify({ message: "Done" })}\n\n`);
   res.end();
   setTimeout(() => tripSessions.delete(tripId), 5 * 60 * 1000);
+});
+
+// --- TRAVEL DATA ARCHITECT (Post-Review Logic) ---
+app.post('/api/planner/audit', async (req, res) => {
+    const trip: any = req.body;
+    if (!trip) return res.status(400).json({ error: "Missing Trip data" });
+
+    console.log(`🔍 [Architect] Auditing Trip: ${trip.trip_title} (${trip.id})`);
+
+    const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
+
+    // 1. Logic for Vibe & Budget Audit (Gemini for speed/smarts)
+    const auditPrompt = `
+    Perform a Data Architect Audit on this travel itinerary.
+    
+    TRIP DATA:
+    - Title: ${trip.trip_title}
+    - Location: ${trip.location.region}, ${trip.location.province}
+    - Prompt Vibe: ${trip.taxonomy.themeLabel}
+    - Prompt Budget: ${trip.metrics.budgetRange}
+    - Start Activity Count: ${trip.summaryStats.totalActivities}
+    
+    ITINERARY SUMMARY:
+    ${trip.itinerary.map((d: any) => 
+        `Day ${d.dayNumber}: Hotel: ${d.accommodation?.hotelName}, Activities: ${d.activities.map((a: any) => `${a.title} ($${a.cost_estimate})`).join(', ')}`
+    ).join('\n')}
+
+    TASK:
+    1. Geo-Normalization: If title/location implies a specific Ontario/Quebec/BC landmark, ensure the province is strictly accurate. 
+    2. Dynamic Vibe Analysis: Analyze the nature of activities. If they added Bars/Pubs -> add 'Nightlife'. If Museums/Arts -> add 'Culture'. If Outdoors/Trails -> add 'Nature'. Return a refined string for tags.
+    3. Financial Audit: If they selected Budget ($) but have $100+ activities or expensive hotels, re-categorize to $$$ (Luxury) or $$ (Standard).
+
+    OUTPUT JSON:
+    Return only a JSON object with these fields:
+    {
+      "refinedProvince": "Province Name",
+      "refinedRegion": "City/Region Name",
+      "refinedTags": ["tag1", "tag2"],
+      "refinedBudgetRange": "$" | "$$" | "$$$" | "$$$$",
+      "refinedThemeLabel": "New Vibe Name",
+      "refinedSeason": ["Season1", "Season2"],
+      "totalActualCost": number
+    }
+    `;
+
+    try {
+        const result = await model.generateContent(auditPrompt);
+        const responseText = result.response.text().replace(/```json|```/g, "").trim();
+        const audit = JSON.parse(responseText);
+
+        // Update Trip Object
+        trip.location.province = audit.refinedProvince || trip.location.province;
+        trip.location.region = audit.refinedRegion || trip.location.region;
+        trip.location.slug = (audit.refinedRegion || trip.location.region).toLowerCase().replace(/\s+/g, '-');
+        
+        // Merge & Unique Tags
+        const existingTags = new Set(trip.tags || []);
+        if (audit.refinedTags) {
+            audit.refinedTags.forEach((t: string) => existingTags.add(t.toLowerCase()));
+        }
+        trip.tags = Array.from(existingTags);
+
+        // Update Metrics & Taxonomy
+        trip.metrics.budgetRange = audit.refinedBudgetRange || trip.metrics.budgetRange;
+        trip.taxonomy.themeLabel = audit.refinedThemeLabel || trip.taxonomy.themeLabel;
+        trip.taxonomy.season = audit.refinedSeason || trip.taxonomy.season || [];
+        
+        // Update Stats
+        const totalActivities = trip.itinerary.reduce((sum: number, d: any) => sum + (d.activities?.length || 0), 0);
+        trip.summaryStats.totalActivities = totalActivities;
+        if (audit.totalActualCost && trip.total_days > 0) {
+            trip.summaryStats.avgCostPerDay = Math.round(audit.totalActualCost / trip.total_days);
+        }
+
+        console.log(`✅ [Architect] Audit Complete. New Budget: ${audit.refinedBudgetRange || 'Unchanged'}`);
+        res.json(trip);
+    } catch (error) {
+        console.warn(`⚠️ [Architect] Audit Fallback triggered: Using original trip data.`);
+        console.error("Audit Error Detail:", error);
+        // CRITICAL: Return original trip so front-end can still persist it despite quota/service errors
+        res.json(req.body);
+    }
 });
 
 function destinationLabel(trip: any) {
