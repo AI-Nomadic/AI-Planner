@@ -21,6 +21,7 @@ const tripSessions = new Map<string, any>();
 const apiKey = process.env.VITE_GEMINI_API_KEY || '';
 const mapsApiKey = process.env.VITE_GOOGLE_MAPS_API_KEY || '';
 const genAI = new GoogleGenerativeAI(apiKey);
+console.log(`[Gemini] Key Status: ${apiKey ? apiKey.slice(0, 4) + '...' : 'MISSING'}`);
 
 const ITINERARY_SCHEMA: Schema = {
   description: "Travel itinerary skeleton",
@@ -57,16 +58,16 @@ const ITINERARY_SCHEMA: Schema = {
       required: ["budgetRange", "difficulty", "activityLevel"]
     },
     tags: {
-        type: SchemaType.ARRAY,
-        items: { type: SchemaType.STRING }
+      type: SchemaType.ARRAY,
+      items: { type: SchemaType.STRING }
     },
     summaryStats: {
-        type: SchemaType.OBJECT,
-        properties: {
-            totalActivities: { type: SchemaType.NUMBER },
-            avgCostPerDay: { type: SchemaType.NUMBER }
-        },
-        required: ["totalActivities", "avgCostPerDay"]
+      type: SchemaType.OBJECT,
+      properties: {
+        totalActivities: { type: SchemaType.NUMBER },
+        avgCostPerDay: { type: SchemaType.NUMBER }
+      },
+      required: ["totalActivities", "avgCostPerDay"]
     },
     itinerary: {
       type: SchemaType.ARRAY,
@@ -105,7 +106,7 @@ const ITINERARY_SCHEMA: Schema = {
     }
   },
   required: [
-    "trip_title", "total_days", "currency", "location", "taxonomy", 
+    "trip_title", "total_days", "currency", "location", "taxonomy",
     "metrics", "tags", "summaryStats", "itinerary"
   ]
 };
@@ -115,18 +116,18 @@ const ITINERARY_SCHEMA: Schema = {
 const addMinutes = (timeStr: string, mins: number): string => {
   const [time, period] = timeStr.split(' ');
   let [hours, minutes] = time.split(':').map(Number);
-  
+
   if (period === 'PM' && hours !== 12) hours += 12;
   if (period === 'AM' && hours === 12) hours = 0;
-  
+
   const date = new Date(0, 0, 0, hours, minutes + mins);
   let h = date.getHours();
   const m = date.getMinutes().toString().padStart(2, '0');
   const p = h >= 12 ? 'PM' : 'AM';
-  
+
   h = h % 12;
   h = h ? h : 12;
-  
+
   return `${h}:${m} ${p}`;
 };
 
@@ -135,10 +136,10 @@ const calculateDistance = (p1: any, p2: any): number => {
   const R = 6371; // Radius of earth in km
   const dLat = (p2.lat - p1.lat) * Math.PI / 180;
   const dLng = (p2.lng - p1.lng) * Math.PI / 180;
-  const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-            Math.cos(p1.lat * Math.PI/180) * Math.cos(p2.lat * Math.PI/180) * 
-            Math.sin(dLng/2) * Math.sin(dLng/2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+  const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(p1.lat * Math.PI / 180) * Math.cos(p2.lat * Math.PI / 180) *
+    Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   return R * c;
 };
 
@@ -153,7 +154,7 @@ const estimateTravelTime = (distanceKm: number): number => {
 
 const searchPhotos = async (query: string, count: number): Promise<string[]> => {
   const sig = Math.floor(Math.random() * 1000000);
-  return Array.from({ length: count }, (_, i) => 
+  return Array.from({ length: count }, (_, i) =>
     `https://images.unsplash.com/photo-${1500000000000 + (sig % 50000)}?q=80&w=800&auto=format&fit=crop&sig=${i}_${encodeURIComponent(query)}`
   );
 };
@@ -161,49 +162,49 @@ const searchPhotos = async (query: string, count: number): Promise<string[]> => 
 const searchPlaceDetails = async (query: string) => {
   if (mapsApiKey) {
     try {
-        const searchResponse = await mapsClient.findPlaceFromText({
-            params: {
-                input: query,
-                inputtype: PlaceInputType.textQuery,
-                fields: ['geometry', 'place_id', 'formatted_address', 'rating', 'user_ratings_total'],
-                key: mapsApiKey,
-            }
-        });
-
-        const basicPlace = searchResponse.data.candidates?.[0];
-        if (basicPlace && basicPlace.place_id) {
-            const detailsResponse = await mapsClient.placeDetails({
-                params: {
-                    place_id: basicPlace.place_id,
-                    fields: ['formatted_phone_number', 'website', 'opening_hours'],
-                    key: mapsApiKey,
-                }
-            });
-            const richPlace = detailsResponse.data.result;
-            return {
-                coordinates: {
-                    lat: basicPlace.geometry?.location.lat,
-                    lng: basicPlace.geometry?.location.lng,
-                },
-                placeId: basicPlace.place_id,
-                rating: basicPlace.rating,
-                user_ratings_total: basicPlace.user_ratings_total,
-                contactNumber: richPlace?.formatted_phone_number,
-                website: richPlace?.website,
-                openingHours: richPlace?.opening_hours?.weekday_text,
-                mapLink: `https://www.google.com/maps/place/?q=place_id:${basicPlace.place_id}`
-            };
+      const searchResponse = await mapsClient.findPlaceFromText({
+        params: {
+          input: query,
+          inputtype: PlaceInputType.textQuery,
+          fields: ['geometry', 'place_id', 'formatted_address', 'rating', 'user_ratings_total'],
+          key: mapsApiKey,
         }
+      });
+
+      const basicPlace = searchResponse.data.candidates?.[0];
+      if (basicPlace && basicPlace.place_id) {
+        const detailsResponse = await mapsClient.placeDetails({
+          params: {
+            place_id: basicPlace.place_id,
+            fields: ['formatted_phone_number', 'website', 'opening_hours'],
+            key: mapsApiKey,
+          }
+        });
+        const richPlace = detailsResponse.data.result;
+        return {
+          coordinates: {
+            lat: basicPlace.geometry?.location.lat,
+            lng: basicPlace.geometry?.location.lng,
+          },
+          placeId: basicPlace.place_id,
+          rating: basicPlace.rating,
+          user_ratings_total: basicPlace.user_ratings_total,
+          contactNumber: richPlace?.formatted_phone_number,
+          website: richPlace?.website,
+          openingHours: richPlace?.opening_hours?.weekday_text,
+          mapLink: `https://www.google.com/maps/place/?q=place_id:${basicPlace.place_id}`
+        };
+      }
     } catch (e) {
-        console.error("[GoogleMaps] Error:", e);
+      console.error("[GoogleMaps] Error:", e);
     }
   }
 
   // Fallback Mock
   return {
     coordinates: {
-        lat: 49.2827 + (Math.random() - 0.5) * 0.05,
-        lng: -123.1207 + (Math.random() - 0.5) * 0.05,
+      lat: 49.2827 + (Math.random() - 0.5) * 0.05,
+      lng: -123.1207 + (Math.random() - 0.5) * 0.05,
     },
     placeId: "mock_" + uuidv4().slice(0, 8),
     rating: (Math.random() * 1.5 + 3.5).toFixed(1),
@@ -222,7 +223,7 @@ app.post('/api/planner/generate', async (req, res) => {
   console.log(`🚀 [Planner] Generating Trip for: ${destination} (${numDays} days)`);
 
   const model = genAI.getGenerativeModel({
-    model: "gemini-flash-latest",
+    model: "gemini-2.5-flash",
     generationConfig: { responseMimeType: "application/json", responseSchema: ITINERARY_SCHEMA },
     systemInstruction: `You are a professional travel concierge. 
     Create a highly accurate Canadian travel itinerary. 
@@ -242,26 +243,35 @@ app.post('/api/planner/generate', async (req, res) => {
     Budget Level: ${budget}. 
     Interests: ${interests}. 
     Ensure the geography is consistent for ${destination}.`;
-    
+
+    console.log("📡 [Planner] Sending request to Gemini...");
     const result = await model.generateContent(userPrompt);
-    const skeleton = JSON.parse(result.response.text());
+    console.log("📥 [Planner] Gemini Response Received");
+    const rawResponse = result.response.text();
+    console.log("📝 [Planner] Raw Response:", rawResponse.substring(0, 100) + "...");
+    const skeleton = JSON.parse(rawResponse);
     const tripId = uuidv4();
     skeleton.id = tripId;
 
     skeleton.itinerary = skeleton.itinerary.map((day: any, idx: number) => {
-        day.id = uuidv4();
-        day.tripId = tripId;
-        day.dayNumber = idx + 1;
-        day.accommodation.id = uuidv4();
-        day.activities = day.activities.map((act: any) => ({ ...act, id: uuidv4(), status: "planned" }));
-        return day;
+      day.id = uuidv4();
+      day.tripId = tripId;
+      day.dayNumber = idx + 1;
+      day.accommodation.id = uuidv4();
+      day.activities = day.activities.map((act: any) => ({ ...act, id: uuidv4(), status: "planned" }));
+      return day;
     });
 
     tripSessions.set(tripId, skeleton);
     res.json(skeleton);
   } catch (error: any) {
     console.error("❌ [Planner] Generation Error:", error);
-    res.status(500).json({ error: "Failed to generate: " + (error.message || "Unknown error") });
+    if (error.response) console.error("Gemini Error Data:", error.response);
+    res.status(500).json({
+      error: "Failed to generate",
+      detail: error.message || "Unknown error",
+      keyStatus: apiKey ? 'Loaded' : 'Missing'
+    });
   }
 });
 
@@ -285,31 +295,31 @@ app.get('/api/planner/stream/:tripId', async (req, res) => {
     let lastCoords = hotelDetails.coordinates;
 
     for (const act of day.activities) {
-        const details = await searchPlaceDetails(act.title + " " + act.location + " " + destinationLabel(trip));
-        act.imageGallery = await searchPhotos(act.title, 3);
-        
-        // --- LOGISTICS ENGINE ---
-        const dist = calculateDistance(lastCoords, details.coordinates);
-        const travelMins = estimateTravelTime(dist);
-        
-        act.travelDistance = Math.round(dist * 10) / 10; // New field for Java Backend
-        act.travelTimeFromPrev = travelMins;
-        act.timeSlot = {
-            start: addMinutes(currentTime, travelMins),
-            end: addMinutes(addMinutes(currentTime, travelMins), act.durationMinutes || 120)
-        };
-        act.time = act.timeSlot.start;
-        act.coordinates = details.coordinates;
-        act.placeId = details.placeId;
-        act.rating = details.rating;
-        act.user_ratings_total = details.user_ratings_total;
-        act.contactNumber = details.contactNumber;
-        act.website = details.website;
-        act.openingHours = details.openingHours;
+      const details = await searchPlaceDetails(act.title + " " + act.location + " " + destinationLabel(trip));
+      act.imageGallery = await searchPhotos(act.title, 3);
 
-        // Move the "Clock" forward
-        currentTime = act.timeSlot.end;
-        lastCoords = details.coordinates;
+      // --- LOGISTICS ENGINE ---
+      const dist = calculateDistance(lastCoords, details.coordinates);
+      const travelMins = estimateTravelTime(dist);
+
+      act.travelDistance = Math.round(dist * 10) / 10; // New field for Java Backend
+      act.travelTimeFromPrev = travelMins;
+      act.timeSlot = {
+        start: addMinutes(currentTime, travelMins),
+        end: addMinutes(addMinutes(currentTime, travelMins), act.durationMinutes || 120)
+      };
+      act.time = act.timeSlot.start;
+      act.coordinates = details.coordinates;
+      act.placeId = details.placeId;
+      act.rating = details.rating;
+      act.user_ratings_total = details.user_ratings_total;
+      act.contactNumber = details.contactNumber;
+      act.website = details.website;
+      act.openingHours = details.openingHours;
+
+      // Move the "Clock" forward
+      currentTime = act.timeSlot.end;
+      lastCoords = details.coordinates;
     }
 
     res.write(`event: day_hydrated\ndata: ${JSON.stringify({ dayIndex: i, dayData: day })}\n\n`);
@@ -323,15 +333,15 @@ app.get('/api/planner/stream/:tripId', async (req, res) => {
 
 // --- TRAVEL DATA ARCHITECT (Post-Review Logic) ---
 app.post('/api/planner/audit', async (req, res) => {
-    const trip: any = req.body;
-    if (!trip) return res.status(400).json({ error: "Missing Trip data" });
+  const trip: any = req.body;
+  if (!trip) return res.status(400).json({ error: "Missing Trip data" });
 
-    console.log(`🔍 [Architect] Auditing Trip: ${trip.trip_title} (${trip.id})`);
+  console.log(`🔍 [Architect] Auditing Trip: ${trip.trip_title} (${trip.id})`);
 
-    const model = genAI.getGenerativeModel({ model: "gemini-flash-latest" });
+  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
-    // 1. Logic for Vibe & Budget Audit (Gemini for speed/smarts)
-    const auditPrompt = `
+  // 1. Logic for Vibe & Budget Audit (Gemini for speed/smarts)
+  const auditPrompt = `
     Perform a Data Architect Audit on this travel itinerary.
     
     TRIP DATA:
@@ -342,9 +352,9 @@ app.post('/api/planner/audit', async (req, res) => {
     - Start Activity Count: ${trip.summaryStats.totalActivities}
     
     ITINERARY SUMMARY:
-    ${trip.itinerary.map((d: any) => 
-        `Day ${d.dayNumber}: Hotel: ${d.accommodation?.hotelName}, Activities: ${d.activities.map((a: any) => `${a.title} ($${a.cost_estimate})`).join(', ')}`
-    ).join('\n')}
+    ${trip.itinerary.map((d: any) =>
+    `Day ${d.dayNumber}: Hotel: ${d.accommodation?.hotelName}, Activities: ${d.activities.map((a: any) => `${a.title} ($${a.cost_estimate})`).join(', ')}`
+  ).join('\n')}
 
     TASK:
     1. Geo-Normalization: If title/location implies a specific Ontario/Quebec/BC landmark, ensure the province is strictly accurate. 
@@ -364,47 +374,47 @@ app.post('/api/planner/audit', async (req, res) => {
     }
     `;
 
-    try {
-        const result = await model.generateContent(auditPrompt);
-        const responseText = result.response.text().replace(/```json|```/g, "").trim();
-        const audit = JSON.parse(responseText);
+  try {
+    const result = await model.generateContent(auditPrompt);
+    const responseText = result.response.text().replace(/```json|```/g, "").trim();
+    const audit = JSON.parse(responseText);
 
-        // Update Trip Object
-        trip.location.province = audit.refinedProvince || trip.location.province;
-        trip.location.region = audit.refinedRegion || trip.location.region;
-        trip.location.slug = (audit.refinedRegion || trip.location.region).toLowerCase().replace(/\s+/g, '-');
-        
-        // Merge & Unique Tags
-        const existingTags = new Set(trip.tags || []);
-        if (audit.refinedTags) {
-            audit.refinedTags.forEach((t: string) => existingTags.add(t.toLowerCase()));
-        }
-        trip.tags = Array.from(existingTags);
+    // Update Trip Object
+    trip.location.province = audit.refinedProvince || trip.location.province;
+    trip.location.region = audit.refinedRegion || trip.location.region;
+    trip.location.slug = (audit.refinedRegion || trip.location.region).toLowerCase().replace(/\s+/g, '-');
 
-        // Update Metrics & Taxonomy
-        trip.metrics.budgetRange = audit.refinedBudgetRange || trip.metrics.budgetRange;
-        trip.taxonomy.themeLabel = audit.refinedThemeLabel || trip.taxonomy.themeLabel;
-        trip.taxonomy.season = audit.refinedSeason || trip.taxonomy.season || [];
-        
-        // Update Stats
-        const totalActivities = trip.itinerary.reduce((sum: number, d: any) => sum + (d.activities?.length || 0), 0);
-        trip.summaryStats.totalActivities = totalActivities;
-        if (audit.totalActualCost && trip.total_days > 0) {
-            trip.summaryStats.avgCostPerDay = Math.round(audit.totalActualCost / trip.total_days);
-        }
-
-        console.log(`✅ [Architect] Audit Complete. New Budget: ${audit.refinedBudgetRange || 'Unchanged'}`);
-        res.json(trip);
-    } catch (error) {
-        console.warn(`⚠️ [Architect] Audit Fallback triggered: Using original trip data.`);
-        console.error("Audit Error Detail:", error);
-        // CRITICAL: Return original trip so front-end can still persist it despite quota/service errors
-        res.json(req.body);
+    // Merge & Unique Tags
+    const existingTags = new Set(trip.tags || []);
+    if (audit.refinedTags) {
+      audit.refinedTags.forEach((t: string) => existingTags.add(t.toLowerCase()));
     }
+    trip.tags = Array.from(existingTags);
+
+    // Update Metrics & Taxonomy
+    trip.metrics.budgetRange = audit.refinedBudgetRange || trip.metrics.budgetRange;
+    trip.taxonomy.themeLabel = audit.refinedThemeLabel || trip.taxonomy.themeLabel;
+    trip.taxonomy.season = audit.refinedSeason || trip.taxonomy.season || [];
+
+    // Update Stats
+    const totalActivities = trip.itinerary.reduce((sum: number, d: any) => sum + (d.activities?.length || 0), 0);
+    trip.summaryStats.totalActivities = totalActivities;
+    if (audit.totalActualCost && trip.total_days > 0) {
+      trip.summaryStats.avgCostPerDay = Math.round(audit.totalActualCost / trip.total_days);
+    }
+
+    console.log(`✅ [Architect] Audit Complete. New Budget: ${audit.refinedBudgetRange || 'Unchanged'}`);
+    res.json(trip);
+  } catch (error) {
+    console.warn(`⚠️ [Architect] Audit Fallback triggered: Using original trip data.`);
+    console.error("Audit Error Detail:", error);
+    // CRITICAL: Return original trip so front-end can still persist it despite quota/service errors
+    res.json(req.body);
+  }
 });
 
 function destinationLabel(trip: any) {
-    return `${trip.location.region || ''} ${trip.location.province || ''}`;
+  return `${trip.location.region || ''} ${trip.location.province || ''}`;
 }
 
 app.listen(port, () => {
@@ -412,4 +422,4 @@ app.listen(port, () => {
 });
 
 // Stay-alive for experimental Node.js
-setInterval(() => {}, 1000 * 60 * 60);
+setInterval(() => { }, 1000 * 60 * 60);
