@@ -111,6 +111,24 @@ const ITINERARY_SCHEMA: Schema = {
   ]
 };
 
+const SUGGESTIONS_SCHEMA: Schema = {
+  description: "List of activity suggestions",
+  type: SchemaType.ARRAY,
+  items: {
+    type: SchemaType.OBJECT,
+    properties: {
+      title: { type: SchemaType.STRING },             // Full proper venue/attraction name
+      category: { type: SchemaType.STRING },          // e.g. Sightseeing, Food, Adventure
+      short_reason: { type: SchemaType.STRING },      // 1 sentence why it's recommended
+      location: { type: SchemaType.STRING },          // Specific street address or area
+      description: { type: SchemaType.STRING },       // 2-3 sentence engaging description
+      cost_estimate: { type: SchemaType.NUMBER },     // Realistic per-person cost in CAD
+      durationMinutes: { type: SchemaType.NUMBER },   // Realistic visit duration in minutes
+    },
+    required: ["title", "category", "short_reason", "location", "description", "cost_estimate", "durationMinutes"]
+  }
+};
+
 // --- LOGISTICS & TIMELINE HELPERS ---
 
 const addMinutes = (timeStr: string, mins: number): string => {
@@ -166,7 +184,7 @@ const searchPlaceDetails = async (query: string) => {
         params: {
           input: query,
           inputtype: PlaceInputType.textQuery,
-          fields: ['geometry', 'place_id', 'formatted_address', 'rating', 'user_ratings_total'],
+          fields: ['geometry', 'place_id', 'formatted_address', 'rating', 'user_ratings_total', 'price_level'],
           key: mapsApiKey,
         }
       });
@@ -176,23 +194,30 @@ const searchPlaceDetails = async (query: string) => {
         const detailsResponse = await mapsClient.placeDetails({
           params: {
             place_id: basicPlace.place_id,
-            fields: ['formatted_phone_number', 'website', 'opening_hours'],
+            fields: ['formatted_phone_number', 'website', 'opening_hours'],  // photos excluded — billed separately
             key: mapsApiKey,
           }
         });
         const richPlace = detailsResponse.data.result;
+
+        // Map price_level (0-4) to rough CAD cost estimate per person
+        const priceLevelCost: Record<number, number> = { 0: 0, 1: 15, 2: 35, 3: 70, 4: 150 };
+        const costHint = basicPlace.price_level !== undefined ? priceLevelCost[basicPlace.price_level as number] : undefined;
+
         return {
           coordinates: {
             lat: basicPlace.geometry?.location.lat,
             lng: basicPlace.geometry?.location.lng,
           },
+          location: basicPlace.formatted_address || query,
           placeId: basicPlace.place_id,
           rating: basicPlace.rating,
           user_ratings_total: basicPlace.user_ratings_total,
           contactNumber: richPlace?.formatted_phone_number,
           website: richPlace?.website,
           openingHours: richPlace?.opening_hours?.weekday_text,
-          mapLink: `https://www.google.com/maps/place/?q=place_id:${basicPlace.place_id}`
+          mapLink: `https://www.google.com/maps/place/?q=place_id:${basicPlace.place_id}`,
+          costHint,
         };
       }
     } catch (e) {
@@ -200,19 +225,21 @@ const searchPlaceDetails = async (query: string) => {
     }
   }
 
-  // Fallback Mock
+  // Fallback Mock (no Maps API key)
   return {
     coordinates: {
       lat: 49.2827 + (Math.random() - 0.5) * 0.05,
       lng: -123.1207 + (Math.random() - 0.5) * 0.05,
     },
+    location: query,
     placeId: "mock_" + uuidv4().slice(0, 8),
     rating: (Math.random() * 1.5 + 3.5).toFixed(1),
     user_ratings_total: Math.floor(Math.random() * 5000),
     contactNumber: "+1 (604) 555-0199",
     website: "https://example.com/verified",
     openingHours: ["Mon-Fri: 9-5"],
-    mapLink: "#"
+    mapLink: "#",
+    costHint: undefined
   };
 };
 
@@ -223,7 +250,7 @@ app.post('/api/planner/generate', async (req, res) => {
   console.log(`🚀 [Planner] Generating Trip for: ${destination} (${numDays} days)`);
 
   const model = genAI.getGenerativeModel({
-    model: "gemini-2.5-flash",
+    model: "gemini-3-flash-preview",  // Quality-critical, called once per trip — 20 RPD is fine
     generationConfig: { responseMimeType: "application/json", responseSchema: ITINERARY_SCHEMA },
     systemInstruction: `You are a professional travel concierge. 
     Create a highly accurate Canadian travel itinerary. 
@@ -338,7 +365,7 @@ app.post('/api/planner/audit', async (req, res) => {
 
   console.log(`🔍 [Architect] Auditing Trip: ${trip.trip_title} (${trip.id})`);
 
-  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+  const model = genAI.getGenerativeModel({ model: "gemini-3-flash-preview" });  // Quality reasoning for audit — called once on save
 
   // 1. Logic for Vibe & Budget Audit (Gemini for speed/smarts)
   const auditPrompt = `
@@ -412,6 +439,134 @@ app.post('/api/planner/audit', async (req, res) => {
     res.json(req.body);
   }
 });
+
+// --- SMART SUGGESTIONS ---
+app.post('/api/planner/suggestions', async (req, res) => {
+  const { destination, tags, count = 6, excludeNames = [] } = req.body;
+  console.log(`💡 [Planner] Generating ${count} Suggestions for: ${destination}. Excluding ${excludeNames.length} items.`);
+
+  const model = genAI.getGenerativeModel({
+    model: "gemini-3.1-flash-lite-preview",  // 500 RPD / 15 RPM — best quota for frequent sidebar calls
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema: SUGGESTIONS_SCHEMA
+    }
+  });
+
+  try {
+    let prompt = `Suggest ${count} unique activities in ${destination} focusing on interests like ${tags?.join(', ') || 'local culture'}.`;
+    if (excludeNames && excludeNames.length > 0) {
+      prompt += `\nCRITICAL DO NOT SUGGEST ANY OF THESE ACTIVITIES as they are already planned: ${excludeNames.join(', ')}.`;
+    }
+    
+    prompt += `\nFor each activity return ALL of these fields:
+    - title: The full proper name of the specific venue or attraction
+    - category: One of: Food, Sightseeing, Adventure, Relaxation, Nightlife, Lodging
+    - short_reason: One sentence explaining why it's worth visiting
+    - location: Specific street address or neighbourhood (e.g. "290 Bremner Blvd, ${destination}")
+    - description: 2-3 sentence engaging description of what makes it special
+    - cost_estimate: Realistic per-person cost in CAD as a number (0 if free)
+    - durationMinutes: Realistic visit duration in minutes as a number
+    Return ONLY a valid JSON array, no markdown.`;
+
+    console.log("📡 [Planner] Calling Gemini for schema-constrained suggestions...");
+    const result = await model.generateContent(prompt);
+
+    // Schema-enforced response is always valid JSON — no regex strip needed
+    const text = result.response.text();
+    const response = JSON.parse(text);
+
+    if (!Array.isArray(response)) {
+      throw new Error("AI did not return a JSON array.");
+    }
+
+    // Add temporary IDs and Skeleton flag for UI rendering
+    const suggestions = response.map((s: any) => ({
+      ...s,
+      id: uuidv4(),
+      isSkeleton: true
+    }));
+
+    console.log(`✅ [Planner] Successfully generated ${suggestions.length} suggestions for ${destination}`);
+    res.json(suggestions);
+  } catch (error: any) {
+    console.error("❌ [Planner] Suggestions Error Details:", {
+      message: error.message,
+      stack: error.stack,
+      dest: destination,
+      tags: tags
+    });
+    res.status(500).json({ error: "Failed to fetch suggestions", details: error.message });
+  }
+});
+
+
+app.post('/api/planner/hydrate-activity', async (req, res) => {
+  const { activity, destination, prevCoords, startTime } = req.body;
+  const startAt = startTime || "9:00 AM";
+
+  console.log(`💧 [Planner] Hydrating: "${activity.title}" in ${destination} (skeleton has pre-generated content)`);
+
+  try {
+    // Content fields already generated in Phase 1 — no Gemini call needed
+    const title = activity.title;
+    const location = activity.location || destination;
+    const description = activity.description || '';
+    const cost_estimate = typeof activity.cost_estimate === 'number' ? activity.cost_estimate : 0;
+    const durationMinutes = typeof activity.durationMinutes === 'number' ? activity.durationMinutes : 90;
+
+    // --- STEP 1: Google Places — real-world enrichment only ---
+    // Precise query using pre-generated location string (same as stream/:tripId)
+    const details = await searchPlaceDetails(`${title} ${location} ${destination}`);
+    const photos = await searchPhotos(title, 3);
+
+    // --- STEP 2: Logistics Engine (same as stream/:tripId) ---
+    const dist = calculateDistance(prevCoords, details.coordinates);
+    const travelMins = estimateTravelTime(dist);
+
+    const timeSlot = {
+      start: addMinutes(startAt, travelMins),
+      end: addMinutes(addMinutes(startAt, travelMins), durationMinutes)
+    };
+
+    const hydratedActivity = {
+      ...activity,
+      id: activity.id,
+      title,
+      location: details.location || location,   // prefer Places formatted_address
+      description,
+      cost_estimate,
+      durationMinutes,
+      coordinates: details.coordinates,
+      placeId: details.placeId,
+      rating: details.rating,
+      user_ratings_total: details.user_ratings_total,
+      contactNumber: details.contactNumber,
+      website: details.website,
+      openingHours: details.openingHours,
+      mapLink: details.mapLink,
+      imageGallery: photos,
+      imageUrl: photos[0],
+      travelDistance: Math.round(dist * 10) / 10,
+      travelTimeFromPrev: travelMins,
+      timeSlot,
+      time: timeSlot.start,
+      status: 'planned',
+      type: 'activity',
+      isSkeleton: false,
+      isHydrating: false,
+      metadata: { isLocked: false, source: 'ai_generated' }
+    };
+
+    console.log(`✅ [Planner] Hydration Complete: "${title}" — Start: ${timeSlot.start}, Travel: ${travelMins}min`);
+    res.json(hydratedActivity);
+  } catch (error: any) {
+    console.error("❌ [Planner] Hydration Error:", error);
+    res.status(500).json({ error: "Failed to hydrate activity", details: error.message });
+  }
+});
+
+
 
 function destinationLabel(trip: any) {
   return `${trip.location.region || ''} ${trip.location.province || ''}`;
