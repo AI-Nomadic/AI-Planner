@@ -442,8 +442,8 @@ app.post('/api/planner/audit', async (req, res) => {
 
 // --- SMART SUGGESTIONS ---
 app.post('/api/planner/suggestions', async (req, res) => {
-  const { destination, tags, count = 6, excludeNames = [] } = req.body;
-  console.log(`💡 [Planner] Generating ${count} Suggestions for: ${destination}. Excluding ${excludeNames.length} items.`);
+  const { destination, tags, type = 'exploration', count = 6, excludeNames = [] } = req.body;
+  console.log(`💡 [Planner] Generating ${count} ${type} Suggestions for: ${destination}. Excluding ${excludeNames.length} items.`);
 
   const model = genAI.getGenerativeModel({
     model: "gemini-3.1-flash-lite-preview",  // 500 RPD / 15 RPM — best quota for frequent sidebar calls
@@ -454,19 +454,28 @@ app.post('/api/planner/suggestions', async (req, res) => {
   });
 
   try {
-    let prompt = `Suggest ${count} unique activities in ${destination} focusing on interests like ${tags?.join(', ') || 'local culture'}.`;
+    let prompt = '';
+    
+    if (type === 'stay') {
+      prompt = `Suggest ${count} highly-rated accommodations, hotels, resorts, or boutique lodges in ${destination} focusing on interests like ${tags?.join(', ') || 'comfortable and central'}.`;
+    } else if (type === 'culinary') {
+      prompt = `Suggest ${count} unique dining experiences, restaurants, cafes, or bars in ${destination} focusing on interests like ${tags?.join(', ') || 'local favorites'}.`;
+    } else {
+      prompt = `Suggest ${count} unique activities in ${destination} focusing on interests like ${tags?.join(', ') || 'local culture'}.`;
+    }
+
     if (excludeNames && excludeNames.length > 0) {
-      prompt += `\nCRITICAL DO NOT SUGGEST ANY OF THESE ACTIVITIES as they are already planned: ${excludeNames.join(', ')}.`;
+      prompt += `\nCRITICAL DO NOT SUGGEST ANY OF THESE as they are already planned: ${excludeNames.join(', ')}.`;
     }
     
-    prompt += `\nFor each activity return ALL of these fields:
-    - title: The full proper name of the specific venue or attraction
-    - category: One of: Food, Sightseeing, Adventure, Relaxation, Nightlife, Lodging
-    - short_reason: One sentence explaining why it's worth visiting
+    prompt += `\nFor each item return ALL of these fields:
+    - title: The full proper name of the specific venue, attraction, or hotel
+    - category: ${type === 'stay' ? 'One of: Luxury, Boutique, Resort, Hostel, B&B' : (type === 'culinary' ? 'One of: Breakfast, Lunch, Dinner, Cafe, Bar, Dessert' : 'One of: Food, Sightseeing, Adventure, Relaxation, Nightlife, Lodging')}
+    - short_reason: One sentence explaining why it's worth visiting or staying at
     - location: Specific street address or neighbourhood (e.g. "290 Bremner Blvd, ${destination}")
     - description: 2-3 sentence engaging description of what makes it special
-    - cost_estimate: Realistic per-person cost in CAD as a number (0 if free)
-    - durationMinutes: Realistic visit duration in minutes as a number
+    - cost_estimate: Realistic per-person cost in CAD as a number (0 if free) (For stay, use estimated price per night)
+    - durationMinutes: Realistic visit duration in minutes as a number (For stay, use 1440)
     Return ONLY a valid JSON array, no markdown.`;
 
     console.log("📡 [Planner] Calling Gemini for schema-constrained suggestions...");
@@ -480,8 +489,14 @@ app.post('/api/planner/suggestions', async (req, res) => {
       throw new Error("AI did not return a JSON array.");
     }
 
+    // Explicitly filter out any hallucinated duplicates that Gemini ignored negative constraints on
+    const safeResponse = response.filter((s: any) => {
+        if (!excludeNames || excludeNames.length === 0) return true;
+        return !excludeNames.some((ex: string) => s.title.toLowerCase().includes(ex.toLowerCase()));
+    });
+
     // Add temporary IDs and Skeleton flag for UI rendering
-    const suggestions = response.map((s: any) => ({
+    const suggestions = safeResponse.map((s: any) => ({
       ...s,
       id: uuidv4(),
       isSkeleton: true
@@ -567,6 +582,48 @@ app.post('/api/planner/hydrate-activity', async (req, res) => {
 });
 
 
+
+app.post('/api/planner/hydrate-accommodation', async (req, res) => {
+  const { accommodation, destination } = req.body;
+
+  console.log(`💧 [Planner] Hydrating Accommodation: "${accommodation.title || accommodation.hotelName}" in ${destination}`);
+
+  try {
+    const title = accommodation.title || accommodation.hotelName;
+    const location = accommodation.location || destination;
+    const description = accommodation.description || '';
+    const cost_estimate = typeof accommodation.cost_estimate === 'number' ? accommodation.cost_estimate : 200;
+
+    const details = await searchPlaceDetails(`${title} ${location} ${destination} hotel`);
+    const photos = await searchPhotos(title + " hotel", 3);
+
+    const hydratedAccommodation = {
+      ...accommodation,
+      id: accommodation.id,
+      type: 'hotel',
+      hotelName: title,
+      address: details.location || location,
+      description: description,
+      pricePerNight: cost_estimate,
+      rating: details.rating ? Number(details.rating) : 4.0,
+      contactNumber: details.contactNumber || '',
+      mapLink: details.mapLink || '',
+      bookingUrl: details.website || '',
+      imageGallery: photos,
+      amenities: ['Wifi', 'Air Conditioning', 'Breakfast'], // Placeholder for now
+      coordinates: details.coordinates,
+      isSkeleton: false,
+      isHydrating: false,
+      bookingStatus: 'draft'
+    };
+
+    console.log(`✅ [Planner] Hydration Complete for Accommodation: "${title}"`);
+    res.json(hydratedAccommodation);
+  } catch (error: any) {
+    console.error("❌ [Planner] Accommodation Hydration Error:", error);
+    res.status(500).json({ error: "Failed to hydrate accommodation", details: error.message });
+  }
+});
 
 function destinationLabel(trip: any) {
   return `${trip.location.region || ''} ${trip.location.province || ''}`;
