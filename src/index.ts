@@ -20,8 +20,11 @@ const tripSessions = new Map<string, any>();
 // -- Gemini Configuration --
 const apiKey = process.env.VITE_GEMINI_API_KEY || '';
 const mapsApiKey = process.env.VITE_GOOGLE_MAPS_API_KEY || '';
+const ticketmasterKey = process.env.TICKETMASTER_API_KEY || '';
+
 const genAI = new GoogleGenerativeAI(apiKey);
 console.log(`[Gemini] Key Status: ${apiKey ? apiKey.slice(0, 4) + '...' : 'MISSING'}`);
+console.log(`[Ticketmaster] Key Status: ${ticketmasterKey ? 'LOADED' : 'MISSING'}`);
 
 const ITINERARY_SCHEMA: Schema = {
   description: "Travel itinerary skeleton",
@@ -243,6 +246,93 @@ const searchPlaceDetails = async (query: string) => {
   };
 };
 
+// --- TIMEZONE & VIBE HELPERS ---
+
+const fetchTicketmasterEvents = async (params: { lat: number, lng: number, start: string, end: string, categories?: string, limit?: number }) => {
+  if (!ticketmasterKey) {
+    console.warn("[Ticketmaster] Missing API Key. Skipping event fetch.");
+    return [];
+  }
+
+  const { lat, lng, start, end, categories, limit = 10 } = params;
+  
+  const searchParams = new URLSearchParams({
+    latlong: `${lat},${lng}`,
+    radius: '10',
+    unit: 'km',
+    startDateTime: `${start}T00:00:00Z`,
+    endDateTime: `${end}T23:59:59Z`,
+    sort: 'distance,asc',
+    size: String(limit),
+    apikey: ticketmasterKey
+  });
+
+  if (categories) {
+    // If it starts with Ticketmaster segment prefix, use segmentId parameter
+    if (categories.startsWith('KZFz')) {
+      searchParams.append('segmentId', categories);
+    } else {
+      searchParams.append('classificationName', categories);
+    }
+  }
+
+  const url = `https://app.ticketmaster.com/discovery/v2/events.json?${searchParams.toString()}`;
+  console.log(`📡 [Ticketmaster] Calling: ${url}`);
+
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      console.error("[Ticketmaster] API Error:", await response.text());
+      return [];
+    }
+
+    const data = await response.json() as any;
+    const events = data._embedded?.events || [];
+
+    return events.map((ev: any) => {
+      // Find the best quality 16:9 image
+      const bestImage = ev.images
+        ?.filter((img: any) => img.ratio === '16_9')
+        ?.sort((a: any, b: any) => b.width - a.width)[0]?.url || ev.images?.[0]?.url;
+
+      const price = ev.priceRanges?.[0]?.min;
+
+      // Format time to 7:00 PM style if localTime exists
+      let displayTime = ev.dates.start.localTime || '19:00:00';
+      try {
+        const [h, m] = displayTime.split(':');
+        const hh = parseInt(h);
+        displayTime = `${hh % 12 || 12}:${m} ${hh >= 12 ? 'PM' : 'AM'}`;
+      } catch (e) {
+        console.warn("[Ticketmaster] Time format failed:", e);
+      }
+
+      return {
+        id: ev.id,
+        title: ev.name,
+        category: ev.classifications?.[0]?.segment?.name || 'Event',
+        short_reason: `Featuring ${ev.name} at ${ev._embedded?.venues?.[0]?.name || 'Local Venue'}.`,
+        location: `${ev._embedded?.venues?.[0]?.address?.line1 || ''}, ${ev._embedded?.venues?.[0]?.city?.name || ''}`,
+        description: ev.info || ev.pleaseNote || `Attend this ${ev.classifications?.[0]?.segment?.name || 'special'} event in Canada.`,
+        cost_estimate: price !== undefined ? price : 0, // Fallback to 0 if missing
+        price_note: price === undefined ? "Check website for price" : undefined,
+        durationMinutes: 120,
+        time: displayTime,
+        start_date: `${ev.dates.start.localDate}T${ev.dates.start.localTime || '19:00:00'}`,
+        eventDate: ev.dates.start.localDate,
+        bookingUrl: ev.url,
+        imageUrl: bestImage,
+        isSkeleton: true,
+        isEvent: true
+      };
+    });
+  } catch (e) {
+    console.error("[Ticketmaster] Fetch failed:", e);
+    return [];
+  }
+};
+
+
 // --- ROUTES ---
 
 app.post('/api/planner/generate', async (req, res) => {
@@ -264,14 +354,41 @@ app.post('/api/planner/generate', async (req, res) => {
   });
 
   try {
+    console.log("📡 [Planner] Sending request to Gemini...");
+    
+    // PHASE A: Fetch top Ticketmaster events to inspire the AI
+    let eventsPrompt = "";
+    try {
+        const details = await searchPlaceDetails(destination);
+        if (details.coordinates && ticketmasterKey) {
+            const start = startDate || new Date().toISOString().split('T')[0];
+            const end = endDate || new Date(Date.now() + numDays * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+            
+            const events = await fetchTicketmasterEvents({
+                lat: details.coordinates.lat || 0,
+                lng: details.coordinates.lng || 0,
+                start,
+                end,
+                limit: 5
+            });
+            
+            if (events.length > 0) {
+                eventsPrompt = `\nREAL-WORLD EVENTS from Ticketmaster occurring during this trip:\n` + 
+                    events.map((e: any) => `- ${e.title} (${e.category}): ${e.description} at ${e.location}`).join('\n') +
+                    `\nINSTRUCTION: Try to include at least one of these real-world events in the itinerary if they fit the vibe and timing.`;
+            }
+        }
+    } catch (e) {
+        console.warn("[Phase A] Failed to fetch events for prompt enhancement:", e);
+    }
+
     const userPrompt = `Generate a trip to ${destination} for ${numDays} days. 
     Timeframe: ${month || 'Anytime'}. 
     Vibe: ${vibe}. 
     Budget Level: ${budget}. 
     Interests: ${interests}. 
-    Ensure the geography is consistent for ${destination}.`;
+    Ensure the geography is consistent for ${destination}.${eventsPrompt}`;
 
-    console.log("📡 [Planner] Sending request to Gemini...");
     const result = await model.generateContent(userPrompt);
     console.log("📥 [Planner] Gemini Response Received");
     const rawResponse = result.response.text();
@@ -496,11 +613,18 @@ app.post('/api/planner/suggestions', async (req, res) => {
     });
 
     // Add temporary IDs and Skeleton flag for UI rendering
-    const suggestions = safeResponse.map((s: any) => ({
+    let suggestions = safeResponse.map((s: any) => ({
       ...s,
       id: uuidv4(),
       isSkeleton: true
     }));
+
+    if (type === 'stay') {
+      console.log(`💧 [Planner] Eagerly hydrating ${suggestions.length} stay suggestions...`);
+      suggestions = await Promise.all(
+          suggestions.map((suggestion: any) => hydrateAccommodationData(suggestion, destination))
+      );
+    }
 
     console.log(`✅ [Planner] Successfully generated ${suggestions.length} suggestions for ${destination}`);
     res.json(suggestions);
@@ -583,45 +707,89 @@ app.post('/api/planner/hydrate-activity', async (req, res) => {
 
 
 
+const hydrateAccommodationData = async (accommodation: any, destination: string) => {
+  const title = accommodation.title || accommodation.hotelName;
+  const location = accommodation.location || destination;
+  const description = accommodation.description || '';
+  const cost_estimate = typeof accommodation.cost_estimate === 'number' ? accommodation.cost_estimate : 200;
+
+  const details = await searchPlaceDetails(`${title} ${location} ${destination} hotel`);
+  const photos = await searchPhotos(title + " hotel", 3);
+
+  return {
+    ...accommodation,
+    id: accommodation.id,
+    type: 'hotel',
+    hotelName: title,
+    address: details.location || location,
+    description: description,
+    pricePerNight: cost_estimate,
+    rating: details.rating ? Number(details.rating) : 4.0,
+    contactNumber: details.contactNumber || '',
+    mapLink: details.mapLink || '',
+    bookingUrl: details.website || '',
+    imageGallery: photos,
+    amenities: ['Wifi', 'Air Conditioning', 'Breakfast'],
+    coordinates: details.coordinates,
+    isSkeleton: false,
+    isHydrating: false,
+    bookingStatus: 'draft'
+  };
+};
+
 app.post('/api/planner/hydrate-accommodation', async (req, res) => {
   const { accommodation, destination } = req.body;
-
   console.log(`💧 [Planner] Hydrating Accommodation: "${accommodation.title || accommodation.hotelName}" in ${destination}`);
 
   try {
-    const title = accommodation.title || accommodation.hotelName;
-    const location = accommodation.location || destination;
-    const description = accommodation.description || '';
-    const cost_estimate = typeof accommodation.cost_estimate === 'number' ? accommodation.cost_estimate : 200;
-
-    const details = await searchPlaceDetails(`${title} ${location} ${destination} hotel`);
-    const photos = await searchPhotos(title + " hotel", 3);
-
-    const hydratedAccommodation = {
-      ...accommodation,
-      id: accommodation.id,
-      type: 'hotel',
-      hotelName: title,
-      address: details.location || location,
-      description: description,
-      pricePerNight: cost_estimate,
-      rating: details.rating ? Number(details.rating) : 4.0,
-      contactNumber: details.contactNumber || '',
-      mapLink: details.mapLink || '',
-      bookingUrl: details.website || '',
-      imageGallery: photos,
-      amenities: ['Wifi', 'Air Conditioning', 'Breakfast'], // Placeholder for now
-      coordinates: details.coordinates,
-      isSkeleton: false,
-      isHydrating: false,
-      bookingStatus: 'draft'
-    };
-
-    console.log(`✅ [Planner] Hydration Complete for Accommodation: "${title}"`);
+    const hydratedAccommodation = await hydrateAccommodationData(accommodation, destination);
+    console.log(`✅ [Planner] Hydration Complete for Accommodation: "${hydratedAccommodation.hotelName}"`);
     res.json(hydratedAccommodation);
   } catch (error: any) {
     console.error("❌ [Planner] Accommodation Hydration Error:", error);
     res.status(500).json({ error: "Failed to hydrate accommodation", details: error.message });
+  }
+});
+
+app.post('/api/planner/events', async (req, res) => {
+  const { destination, categories, startDate, endDate, tags } = req.body;
+  console.log(`🎟️ [Planner] Fetching Dynamic Ticketmaster Events for: ${destination}`);
+
+  try {
+    // 1. Get Coordinates for destination
+    const details = await searchPlaceDetails(destination);
+    if (!details.coordinates) throw new Error("Could not find coordinates for destination");
+
+    // 2. Map Sidebar Tags to Ticketmaster Segment IDs
+    let classificationFilter = categories;
+    if (!classificationFilter && tags && tags.length > 0) {
+        const tag = tags[0];
+        // Use hard IDs for reliability as requested
+        if (tag === 'Music') classificationFilter = 'KZFzniwnSyZfZ7v7nJ';
+        else if (tag === 'Sports') classificationFilter = 'KZFzniwnSyZfZ7v7nE';
+        else if (tag === 'Arts & Theatre') classificationFilter = 'KZFzniwnSyZfZ7v7na';
+        else if (tag === 'Film') classificationFilter = 'KZFzniwnSyZfZ7v7nn';
+        else if (tag === 'Miscellaneous') classificationFilter = 'KZFzniwnSyZfZ7v7n1';
+        else classificationFilter = tag; 
+    }
+
+    const start = startDate || new Date().toISOString().split('T')[0];
+    const end = endDate || new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+
+    const events = await fetchTicketmasterEvents({
+        lat: details.coordinates.lat || 0,
+        lng: details.coordinates.lng || 0,
+        start,
+        end,
+        categories: classificationFilter,
+        limit: 12
+    });
+
+    console.log(`✅ [Ticketmaster] Found ${events.length} events for ${destination}`);
+    res.json(events);
+  } catch (error: any) {
+    console.error("❌ [Ticketmaster] Error:", error.message);
+    res.status(500).json({ error: "Failed to fetch Ticketmaster events", details: error.message });
   }
 });
 
