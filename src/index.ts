@@ -173,13 +173,6 @@ const estimateTravelTime = (distanceKm: number): number => {
 
 // --- HYDRATORS ---
 
-const searchPhotos = async (query: string, count: number): Promise<string[]> => {
-  const sig = Math.floor(Math.random() * 1000000);
-  return Array.from({ length: count }, (_, i) =>
-    `https://images.unsplash.com/photo-${1500000000000 + (sig % 50000)}?q=80&w=800&auto=format&fit=crop&sig=${i}_${encodeURIComponent(query)}`
-  );
-};
-
 const searchPlaceDetails = async (query: string) => {
   if (mapsApiKey) {
     try {
@@ -197,11 +190,16 @@ const searchPlaceDetails = async (query: string) => {
         const detailsResponse = await mapsClient.placeDetails({
           params: {
             place_id: basicPlace.place_id,
-            fields: ['formatted_phone_number', 'website', 'opening_hours'],  // photos excluded — billed separately
+            fields: ['formatted_phone_number', 'website', 'opening_hours', 'photos'],
             key: mapsApiKey,
           }
         });
         const richPlace = detailsResponse.data.result;
+
+        // Extract photos (max 4)
+        const photoUrls = richPlace?.photos?.slice(0, 4).map((p: any) => 
+          `https://maps.googleapis.com/maps/api/place/photo?maxwidth=800&photo_reference=${p.photo_reference}&key=${mapsApiKey}`
+        ) || [];
 
         // Map price_level (0-4) to rough CAD cost estimate per person
         const priceLevelCost: Record<number, number> = { 0: 0, 1: 15, 2: 35, 3: 70, 4: 150 };
@@ -220,6 +218,7 @@ const searchPlaceDetails = async (query: string) => {
           website: richPlace?.website,
           openingHours: richPlace?.opening_hours?.weekday_text,
           mapLink: `https://www.google.com/maps/place/?q=place_id:${basicPlace.place_id}`,
+          imageGallery: photoUrls,
           costHint,
         };
       }
@@ -242,6 +241,7 @@ const searchPlaceDetails = async (query: string) => {
     website: "https://example.com/verified",
     openingHours: ["Mon-Fri: 9-5"],
     mapLink: "#",
+    imageGallery: [],
     costHint: undefined
   };
 };
@@ -433,14 +433,14 @@ app.get('/api/planner/stream/:tripId', async (req, res) => {
     // 1. Hydrate Accommodation Details
     const hotelDetails = await searchPlaceDetails(day.accommodation.hotelName + " " + destinationLabel(trip));
     day.accommodation = { ...day.accommodation, ...hotelDetails };
-    day.accommodation.imageGallery = await searchPhotos(day.accommodation.hotelName, 4);
+    day.accommodation.imageGallery = hotelDetails.imageGallery || [];
 
     // 2. Hydrate Activities & Calculate Timeline
     let lastCoords = hotelDetails.coordinates;
 
     for (const act of day.activities) {
       const details = await searchPlaceDetails(act.title + " " + act.location + " " + destinationLabel(trip));
-      act.imageGallery = await searchPhotos(act.title, 3);
+      act.imageGallery = details.imageGallery || [];
 
       // --- LOGISTICS ENGINE ---
       const dist = calculateDistance(lastCoords, details.coordinates);
@@ -657,7 +657,6 @@ app.post('/api/planner/hydrate-activity', async (req, res) => {
     // --- STEP 1: Google Places — real-world enrichment only ---
     // Precise query using pre-generated location string (same as stream/:tripId)
     const details = await searchPlaceDetails(`${title} ${location} ${destination}`);
-    const photos = await searchPhotos(title, 3);
 
     // --- STEP 2: Logistics Engine (same as stream/:tripId) ---
     const dist = calculateDistance(prevCoords, details.coordinates);
@@ -684,8 +683,8 @@ app.post('/api/planner/hydrate-activity', async (req, res) => {
       website: details.website,
       openingHours: details.openingHours,
       mapLink: details.mapLink,
-      imageGallery: photos,
-      imageUrl: photos[0],
+      imageGallery: details.imageGallery || [],
+      imageUrl: details.imageGallery?.[0],
       travelDistance: Math.round(dist * 10) / 10,
       travelTimeFromPrev: travelMins,
       timeSlot,
@@ -714,7 +713,6 @@ const hydrateAccommodationData = async (accommodation: any, destination: string)
   const cost_estimate = typeof accommodation.cost_estimate === 'number' ? accommodation.cost_estimate : 200;
 
   const details = await searchPlaceDetails(`${title} ${location} ${destination} hotel`);
-  const photos = await searchPhotos(title + " hotel", 3);
 
   return {
     ...accommodation,
@@ -728,7 +726,7 @@ const hydrateAccommodationData = async (accommodation: any, destination: string)
     contactNumber: details.contactNumber || '',
     mapLink: details.mapLink || '',
     bookingUrl: details.website || '',
-    imageGallery: photos,
+    imageGallery: details.imageGallery || [],
     amenities: ['Wifi', 'Air Conditioning', 'Breakfast'],
     coordinates: details.coordinates,
     isSkeleton: false,
