@@ -358,8 +358,13 @@ app.post('/api/planner/generate', async (req, res) => {
     
     // PHASE A: Fetch top Ticketmaster events to inspire the AI
     let eventsPrompt = "";
+    let destinationFeaturedImage = "";
     try {
         const details = await searchPlaceDetails(destination);
+        if (details.imageGallery && details.imageGallery.length > 0) {
+            destinationFeaturedImage = details.imageGallery[0];
+        }
+
         if (details.coordinates && ticketmasterKey) {
             const start = startDate || new Date().toISOString().split('T')[0];
             const end = endDate || new Date(Date.now() + numDays * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
@@ -396,14 +401,33 @@ app.post('/api/planner/generate', async (req, res) => {
     const skeleton = JSON.parse(rawResponse);
     const tripId = uuidv4();
     skeleton.id = tripId;
+    
+    if (destinationFeaturedImage) {
+        skeleton.featuredImage = destinationFeaturedImage;
+    }
 
     skeleton.itinerary = skeleton.itinerary.map((day: any, idx: number) => {
-      day.id = uuidv4();
-      day.tripId = tripId;
-      day.dayNumber = idx + 1;
-      day.accommodation.id = uuidv4();
-      day.activities = day.activities.map((act: any) => ({ ...act, id: uuidv4(), status: "planned" }));
-      return day;
+      const dayId = uuidv4();
+      return {
+        ...day,
+        id: dayId,
+        tripId: tripId,
+        dayNumber: idx + 1,
+        accommodation: day.accommodation ? {
+          ...day.accommodation,
+          id: uuidv4()
+        } : {
+          id: uuidv4(),
+          hotelName: "TBD",
+          type: "hotel",
+          bookingStatus: "draft"
+        },
+        activities: (day.activities || []).map((act: any) => ({
+          ...act,
+          id: uuidv4(),
+          status: "planned"
+        }))
+      };
     });
 
     tripSessions.set(tripId, skeleton);
